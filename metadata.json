@@ -1,0 +1,6 @@
+{
+  "name": "RattedOut",
+  "description": "A minimalist light-themed social deduction game featuring interactive tasks, impostor sabotage, AI meetings, and live protocol telemetry.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
