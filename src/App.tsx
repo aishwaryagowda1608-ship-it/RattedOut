@@ -327,6 +327,7 @@ export default function App() {
   // Keyboard controls tracking
   const keysPressed = useRef<{ [key: string]: boolean }>({});
   const joystickVector = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [killFlash, setKillFlash] = useState<boolean>(false);
 
   const localPlayer = players.find((p) => p.id === localPlayerId) || {
     id: localPlayerId,
@@ -346,6 +347,7 @@ export default function App() {
     votedFor: null,
     hasVoted: false,
     killCooldown: 20,
+    emergencyMeetingsRemaining: 1,
     isVenting: false,
     alibiHistory: [],
     suspicionScore: 0,
@@ -405,6 +407,7 @@ export default function App() {
         votedFor: null,
         hasVoted: false,
         killCooldown: settings.killCooldown,
+        emergencyMeetingsRemaining: settings.emergencyMeetings,
         isVenting: false,
         alibiHistory: [{ room: 'Cafeteria', time: Date.now() }],
         suspicionScore: 0,
@@ -451,6 +454,7 @@ export default function App() {
         votedFor: null,
         hasVoted: false,
         killCooldown: settings.killCooldown,
+        emergencyMeetingsRemaining: settings.emergencyMeetings,
         isVenting: false,
         alibiHistory: [{ room: 'Cafeteria', time: Date.now() }],
         suspicionScore: 0,
@@ -478,10 +482,147 @@ export default function App() {
     setGameState('ROLE_REVEAL');
   };
 
+  // Proximity Detections for Action Buttons
+  const nearbyTask = React.useMemo(() => {
+    if (localPlayer.isDead) return null;
+    return (
+      localPlayer.tasks?.find((t) => {
+        if (t.completed) return false;
+        const dist = Math.hypot(localPlayer.x - t.x, localPlayer.y - t.y);
+        return dist < 70;
+      }) || null
+    );
+  }, [localPlayer]);
+
+  const nearbyBody = React.useMemo(() => {
+    if (localPlayer.isDead) return null;
+    return (
+      deadBodies.find((b) => {
+        const dist = Math.hypot(localPlayer.x - b.x, localPlayer.y - b.y);
+        return dist < 95;
+      }) || null
+    );
+  }, [localPlayer, deadBodies]);
+
+  const nearbyVent = React.useMemo(() => {
+    if (!localPlayer.role.includes('IMPOSTOR') || localPlayer.isDead) return null;
+    const vent = MAP_VENTS.find((v) => Math.hypot(localPlayer.x - v.x, localPlayer.y - v.y) < 65);
+    return vent ? vent.id : null;
+  }, [localPlayer]);
+
+  const nearbyKillTarget = React.useMemo(() => {
+    if (!localPlayer.role.includes('IMPOSTOR') || localPlayer.isDead || localPlayer.killCooldown > 0) return null;
+    return (
+      players.find((p) => {
+        if (p.id === localPlayer.id || p.isDead || p.role.includes('IMPOSTOR') || p.isVenting) return false;
+        const dist = Math.hypot(localPlayer.x - p.x, localPlayer.y - p.y);
+        return dist < 85;
+      }) || null
+    );
+  }, [localPlayer, players]);
+
+  const canCallEmergency = React.useMemo(() => {
+    if (localPlayer.isDead || (localPlayer.emergencyMeetingsRemaining !== undefined && localPlayer.emergencyMeetingsRemaining <= 0)) {
+      return false;
+    }
+    const dist = Math.hypot(localPlayer.x - EMERGENCY_BUTTON_POS.x, localPlayer.y - EMERGENCY_BUTTON_POS.y);
+    return dist < 75 && sabotage.activeType === null;
+  }, [localPlayer, sabotage.activeType]);
+
+  const canUseAdmin = React.useMemo(() => {
+    if (localPlayer.isDead) return false;
+    const dist = Math.hypot(localPlayer.x - ADMIN_TABLE_POS.x, localPlayer.y - ADMIN_TABLE_POS.y);
+    return dist < 65;
+  }, [localPlayer]);
+
+  const canUseSecurity = React.useMemo(() => {
+    if (localPlayer.isDead) return false;
+    const dist = Math.hypot(localPlayer.x - SECURITY_DESK_POS.x, localPlayer.y - SECURITY_DESK_POS.y);
+    return dist < 65;
+  }, [localPlayer]);
+
+  const canFixSabotage = React.useMemo(() => {
+    if (!sabotage.activeType || localPlayer.isDead) return false;
+    const room = localPlayer.currentRoom;
+    if (sabotage.activeType === 'OXYGEN' && (room.includes('O2') || room.includes('Admin'))) return true;
+    if (sabotage.activeType === 'REACTOR' && room.includes('Reactor')) return true;
+    if (sabotage.activeType === 'LIGHTS' && room.includes('Electrical')) return true;
+    if (sabotage.activeType === 'COMMS' && room.includes('Comms')) return true;
+    return false;
+  }, [sabotage.activeType, localPlayer]);
+
   // Keyboard Event Handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger game hotkeys if typing in chat / input
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement)?.isContentEditable
+      ) {
+        return;
+      }
+
       keysPressed.current[e.key.toLowerCase()] = true;
+
+      if (gameState === 'PLAYING') {
+        // [Q] -> Impostor Kill
+        if (e.key === 'q' || e.key === 'Q') {
+          if (
+            localPlayer.role.includes('IMPOSTOR') &&
+            !localPlayer.isDead &&
+            localPlayer.killCooldown <= 0 &&
+            nearbyKillTarget
+          ) {
+            e.preventDefault();
+            handleKill(nearbyKillTarget);
+          }
+        }
+
+        // [R] -> Report Dead Body
+        if (e.key === 'r' || e.key === 'R') {
+          if (!localPlayer.isDead && nearbyBody) {
+            e.preventDefault();
+            handleReport(nearbyBody);
+          }
+        }
+
+        // [E] or [Space] -> Primary Action (Use / Task / Sabotage Fix / Admin / Emergency)
+        if (e.key === 'e' || e.key === 'E' || e.key === ' ') {
+          if (canFixSabotage) {
+            e.preventDefault();
+            setShowSabotageFix(true);
+          } else if (canCallEmergency) {
+            e.preventDefault();
+            handleCallEmergency();
+          } else if (nearbyTask) {
+            e.preventDefault();
+            setActiveTask(nearbyTask);
+          } else if (canUseAdmin) {
+            e.preventDefault();
+            setShowAdminConsole(true);
+          } else if (canUseSecurity) {
+            e.preventDefault();
+            setShowSecurityConsole(true);
+          }
+        }
+
+        // [V] -> Impostor Vent Hop
+        if (e.key === 'v' || e.key === 'V') {
+          if (localPlayer.role.includes('IMPOSTOR') && !localPlayer.isDead && nearbyVent) {
+            e.preventDefault();
+            handleVent(nearbyVent);
+          }
+        }
+
+        // [S] -> Impostor Sabotage Map
+        if (e.key === 's' || e.key === 'S') {
+          if (localPlayer.role.includes('IMPOSTOR') && !localPlayer.isDead) {
+            e.preventDefault();
+            setShowSabotagePanel((prev) => !prev);
+          }
+        }
+      }
 
       if (e.key === 'm' || e.key === 'M') {
         setShowMapOverlay((prev) => !prev);
@@ -528,6 +669,15 @@ export default function App() {
     };
   }, [
     gameState,
+    localPlayer,
+    nearbyKillTarget,
+    nearbyBody,
+    nearbyTask,
+    nearbyVent,
+    canCallEmergency,
+    canFixSabotage,
+    canUseAdmin,
+    canUseSecurity,
     showInviteModal,
     showSettingsModal,
     activeTask,
@@ -539,91 +689,47 @@ export default function App() {
     isProtocolOpen,
   ]);
 
-  // Proximity Detections for Action Buttons
-  const nearbyTask = React.useMemo(() => {
-    if (localPlayer.isDead) return null;
-    return (
-      localPlayer.tasks?.find((t) => {
-        if (t.completed) return false;
-        const dist = Math.hypot(localPlayer.x - t.x, localPlayer.y - t.y);
-        return dist < 65;
-      }) || null
-    );
-  }, [localPlayer]);
-
-  const nearbyBody = React.useMemo(() => {
-    if (localPlayer.isDead) return null;
-    return (
-      deadBodies.find((b) => {
-        const dist = Math.hypot(localPlayer.x - b.x, localPlayer.y - b.y);
-        return dist < 85;
-      }) || null
-    );
-  }, [localPlayer, deadBodies]);
-
-  const nearbyVent = React.useMemo(() => {
-    if (!localPlayer.role.includes('IMPOSTOR') || localPlayer.isDead) return null;
-    const vent = MAP_VENTS.find((v) => Math.hypot(localPlayer.x - v.x, localPlayer.y - v.y) < 55);
-    return vent ? vent.id : null;
-  }, [localPlayer]);
-
-  const nearbyKillTarget = React.useMemo(() => {
-    if (!localPlayer.role.includes('IMPOSTOR') || localPlayer.isDead || localPlayer.killCooldown > 0) return null;
-    return (
-      players.find((p) => {
-        if (p.id === localPlayer.id || p.isDead || p.role.includes('IMPOSTOR') || p.isVenting) return false;
-        const dist = Math.hypot(localPlayer.x - p.x, localPlayer.y - p.y);
-        return dist < 75;
-      }) || null
-    );
-  }, [localPlayer, players]);
-
-  const canCallEmergency = React.useMemo(() => {
-    if (localPlayer.isDead) return false;
-    const dist = Math.hypot(localPlayer.x - EMERGENCY_BUTTON_POS.x, localPlayer.y - EMERGENCY_BUTTON_POS.y);
-    return dist < 65 && sabotage.activeType === null;
-  }, [localPlayer, sabotage.activeType]);
-
-  const canUseAdmin = React.useMemo(() => {
-    if (localPlayer.isDead) return false;
-    const dist = Math.hypot(localPlayer.x - ADMIN_TABLE_POS.x, localPlayer.y - ADMIN_TABLE_POS.y);
-    return dist < 60;
-  }, [localPlayer]);
-
-  const canUseSecurity = React.useMemo(() => {
-    if (localPlayer.isDead) return false;
-    const dist = Math.hypot(localPlayer.x - SECURITY_DESK_POS.x, localPlayer.y - SECURITY_DESK_POS.y);
-    return dist < 60;
-  }, [localPlayer]);
-
-  const canFixSabotage = React.useMemo(() => {
-    if (!sabotage.activeType || localPlayer.isDead) return false;
-    const room = localPlayer.currentRoom;
-    if (sabotage.activeType === 'OXYGEN' && (room.includes('O2') || room.includes('Admin'))) return true;
-    if (sabotage.activeType === 'REACTOR' && room.includes('Reactor')) return true;
-    if (sabotage.activeType === 'LIGHTS' && room.includes('Electrical')) return true;
-    if (sabotage.activeType === 'COMMS' && room.includes('Comms')) return true;
-    return false;
-  }, [sabotage.activeType, localPlayer]);
-
-  // Execute Kill Action
+  // Execute Kill Action (Authoritative Simulation)
   const handleKill = (victim: Player) => {
+    // 1. Authoritative Validation
+    if (!localPlayer.role.includes('IMPOSTOR') || localPlayer.isDead || localPlayer.killCooldown > 0) {
+      return;
+    }
+    if (victim.isDead || victim.role.includes('IMPOSTOR')) {
+      return;
+    }
+    const distance = Math.hypot(localPlayer.x - victim.x, localPlayer.y - victim.y);
+    if (distance > 100) {
+      return;
+    }
+
+    // 2. Play sound and trigger red kill flash effect
     sound.playKill();
+    setKillFlash(true);
+    setTimeout(() => setKillFlash(false), 350);
+
+    // 3. Log Hazel Protocol packet
     protocol.log(
       'Reliable',
       'GameData',
       localPlayer.name,
-      `RpcMurderPlayer executed on ${victim.name}`,
+      `RpcMurderPlayer executed on victim [${victim.name}] (Distance: ${Math.round(distance)}px)`,
       'MurderPlayer',
       true
     );
 
-    // Update Victim State
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === victim.id ? { ...p, isDead: true, role: 'GHOST_CREW' } : p))
-    );
+    // 4. Update player states: Victim becomes Ghost, Impostor resets cooldown
+    const nextPlayers = players.map((p) => {
+      if (p.id === victim.id) {
+        return { ...p, isDead: true, role: 'GHOST_CREW' as Role };
+      }
+      if (p.id === localPlayer.id) {
+        return { ...p, killCooldown: settings.killCooldown };
+      }
+      return p;
+    });
 
-    // Spawn Dead Body
+    // 5. Spawn Dead Body at exact victim coordinates
     const newBody: DeadBody = {
       id: generateBodyId(),
       victimId: victim.id,
@@ -631,45 +737,66 @@ export default function App() {
       victimColor: victim.color,
       x: victim.x,
       y: victim.y,
-      room: victim.currentRoom,
+      room: victim.currentRoom || getRoomAt(victim.x, victim.y),
       reported: false,
     };
+
+    setPlayers(nextPlayers);
     setDeadBodies((prev) => [...prev, newBody]);
 
-    // Reset Kill Cooldown
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === localPlayer.id ? { ...p, killCooldown: settings.killCooldown } : p))
-    );
-
-    // Check Win Condition
-    checkWinConditions();
+    // 6. Immediate Win Check
+    checkWinConditions(nextPlayers);
   };
 
-  // Report Dead Body
+  // Report Dead Body (Authoritative Simulation)
   const handleReport = (body: DeadBody) => {
+    if (localPlayer.isDead) return;
+    const distance = Math.hypot(localPlayer.x - body.x, localPlayer.y - body.y);
+    if (distance > 115) return;
+
     sound.playEmergency();
     protocol.log(
       'Reliable',
       'GameData',
       localPlayer.name,
-      `RpcReportDeadBody (Victim: ${body.victimName})`,
+      `RpcReportDeadBody (Victim: ${body.victimName}, Room: ${body.room})`,
       'ReportDeadBody',
       true
     );
 
+    // Remove the reported body and start meeting
+    setDeadBodies((prev) => prev.filter((b) => b.id !== body.id));
     startEmergencyMeeting(localPlayer, true, body);
   };
 
   // Call Emergency Button
   const handleCallEmergency = () => {
+    if (localPlayer.isDead || sabotage.activeType !== null) return;
+    if (localPlayer.emergencyMeetingsRemaining !== undefined && localPlayer.emergencyMeetingsRemaining <= 0) return;
+
+    const distance = Math.hypot(localPlayer.x - EMERGENCY_BUTTON_POS.x, localPlayer.y - EMERGENCY_BUTTON_POS.y);
+    if (distance > 85) return;
+
     sound.playEmergency();
     protocol.log(
       'Reliable',
       'GameData',
       localPlayer.name,
-      'RpcReportDeadBody (Emergency Console Activated)',
+      'RpcReportDeadBody (Emergency Console Activated in Cafeteria)',
       'ReportDeadBody',
       true
+    );
+
+    // Decrement emergency meetings count
+    setPlayers((prev) =>
+      prev.map((p) =>
+        p.id === localPlayer.id
+          ? {
+              ...p,
+              emergencyMeetingsRemaining: Math.max(0, (p.emergencyMeetingsRemaining ?? settings.emergencyMeetings) - 1),
+            }
+          : p
+      )
     );
 
     startEmergencyMeeting(localPlayer, false);
@@ -744,15 +871,15 @@ export default function App() {
   // Task Completion
   const handleCompleteTask = (taskId: string) => {
     sound.playTaskComplete();
-    setPlayers((prev) =>
-      prev.map((p) => {
-        if (p.id === localPlayer.id) {
-          const updated = p.tasks.map((t) => (t.id === taskId ? { ...t, completed: true } : t));
-          return { ...p, tasks: updated };
-        }
-        return p;
-      })
-    );
+    const updatedPlayers = players.map((p) => {
+      if (p.id === localPlayer.id) {
+        const updated = p.tasks.map((t) => (t.id === taskId ? { ...t, completed: true } : t));
+        return { ...p, tasks: updated };
+      }
+      return p;
+    });
+
+    setPlayers(updatedPlayers);
 
     const taskObj = localPlayer.tasks.find((t) => t.id === taskId);
     protocol.log(
@@ -765,12 +892,12 @@ export default function App() {
     );
 
     setActiveTask(null);
-    checkWinConditions();
+    checkWinConditions(updatedPlayers);
   };
 
   // Start Meeting Flow
   const startEmergencyMeeting = (caller: Player, isBody: boolean, body?: DeadBody) => {
-    // Reset player states
+    // Reset player positions & clear venting
     setPlayers((prev) =>
       prev.map((p) => ({
         ...p,
@@ -781,6 +908,9 @@ export default function App() {
         y: 240 + (Math.random() * 40 - 20),
       }))
     );
+
+    // Clean up all dead bodies on meeting table gather
+    setDeadBodies([]);
 
     const initialMessages: ChatMessage[] = [
       {
@@ -803,10 +933,12 @@ export default function App() {
         senderId: caller.id,
         senderName: caller.name,
         senderColor: caller.color,
-        text: `Found ${body.victimName}'s body in ${body.room}! Anyone else nearby?`,
+        text: `Found ${body.victimName}'s body in ${body.room}! Anyone seen anything?`,
         timestamp: Date.now(),
       });
     }
+
+    const hasDiscussion = settings.discussionTime > 0;
 
     setMeeting({
       callerId: caller.id,
@@ -815,7 +947,7 @@ export default function App() {
       isBodyReport: isBody,
       bodyVictimName: body?.victimName,
       bodyVictimColor: body?.victimColor,
-      phase: 'DISCUSSION',
+      phase: hasDiscussion ? 'DISCUSSION' : 'VOTING',
       timeLeft: settings.discussionTime + settings.votingTime,
       votes: {},
       messages: initialMessages,
@@ -895,10 +1027,10 @@ export default function App() {
         : (ejectedId as any);
 
     // Apply ejection to player state
+    let updatedPlayers = players;
     if (typeof ejectedPlayerObj === 'object' && ejectedPlayerObj !== null) {
-      setPlayers((prev) =>
-        prev.map((p) => (p.id === ejectedPlayerObj.id ? { ...p, isDead: true, role: 'GHOST_CREW' } : p))
-      );
+      updatedPlayers = players.map((p) => (p.id === ejectedPlayerObj.id ? { ...p, isDead: true, role: 'GHOST_CREW' } : p));
+      setPlayers(updatedPlayers);
       protocol.log('Reliable', 'GameData', 'Host', `RpcExiled (${ejectedPlayerObj.name})`, 'Exiled', true);
     }
 
@@ -907,9 +1039,9 @@ export default function App() {
   };
 
   // Check Win Conditions
-  const checkWinConditions = () => {
-    const aliveImps = players.filter((p) => p.role.includes('IMPOSTOR') && !p.isDead).length;
-    const aliveCrew = players.filter((p) => !p.role.includes('IMPOSTOR') && !p.isDead).length;
+  const checkWinConditions = (currentPlayers: Player[] = players) => {
+    const aliveImps = currentPlayers.filter((p) => p.role.includes('IMPOSTOR') && !p.isDead).length;
+    const aliveCrew = currentPlayers.filter((p) => !p.role.includes('IMPOSTOR') && !p.isDead).length;
 
     // Condition 1: All Impostors eliminated
     if (aliveImps === 0) {
@@ -924,7 +1056,7 @@ export default function App() {
         reason: 'All Impostors have been successfully identified and ejected!',
       });
       setGameState('GAME_OVER');
-      return;
+      return true;
     }
 
     // Condition 2: Impostors equal or outnumber living Crew
@@ -940,11 +1072,11 @@ export default function App() {
         reason: 'Impostors equaled the living crew and took control of the station.',
       });
       setGameState('GAME_OVER');
-      return;
+      return true;
     }
 
     // Condition 3: All Crew Tasks Complete
-    const allCrewTasks = players
+    const allCrewTasks = currentPlayers
       .filter((p) => !p.role.includes('IMPOSTOR'))
       .flatMap((p) => p.tasks);
 
@@ -960,8 +1092,10 @@ export default function App() {
         reason: 'The crew completed all station maintenance tasks before sabotage succeeded!',
       });
       setGameState('GAME_OVER');
-      return;
+      return true;
     }
+
+    return false;
   };
 
   // Main Simulation Loop (Movement, AI decisions, Timers)
@@ -1155,17 +1289,21 @@ export default function App() {
         let updatedMessages = prev.messages;
         let updatedVotes = { ...prev.votes };
 
-        // Trigger AI chat messages periodically
-        if (nextTime === settings.votingTime + 8) {
+        // Determine current phase based on remaining time
+        const isDiscussion = nextTime > settings.votingTime;
+        const currentPhase = isDiscussion ? 'DISCUSSION' : 'VOTING';
+
+        // Trigger AI chat messages periodically during discussion
+        if (nextTime === settings.votingTime + 8 || nextTime === settings.votingTime + 3) {
           const aliveBots = players.filter((p) => p.isAI && !p.isDead);
           if (aliveBots.length > 0) {
             const randomBot = aliveBots[Math.floor(Math.random() * aliveBots.length)];
             const textOptions = [
-              `I was in ${randomBot.currentRoom} doing tasks.`,
-              `Where was the body found?`,
-              `Did anyone see anyone venting?`,
-              `I was with ${players[0]?.name || 'someone'} earlier.`,
-              `Skip vote if we are not sure?`,
+              `I was in ${randomBot.currentRoom} completing tasks.`,
+              `Where exactly was the body discovered?`,
+              `Did anyone spot suspicious movements or venting?`,
+              `I was doing wires with ${players[0]?.name || 'a crewmate'} earlier.`,
+              `Let's skip if we don't have definitive proof.`,
             ];
             const text = textOptions[Math.floor(Math.random() * textOptions.length)];
             const aiMsg: ChatMessage = {
@@ -1180,32 +1318,47 @@ export default function App() {
           }
         }
 
-        // Trigger AI Bots Voting around voting phase
-        if (nextTime <= settings.votingTime && Object.keys(updatedVotes).length < players.filter((p) => !p.isDead).length - 1) {
+        // Trigger AI Bots Voting once in voting phase
+        if (!isDiscussion && Object.keys(updatedVotes).length < players.filter((p) => !p.isDead).length) {
           const aliveBots = players.filter((p) => p.isAI && !p.isDead && !updatedVotes[p.id]);
           if (aliveBots.length > 0) {
             const votingBot = aliveBots[0];
             const candidatePool = players.filter((p) => !p.isDead && p.id !== votingBot.id);
-            const botVote = Math.random() < 0.3 ? 'SKIP' : candidatePool[Math.floor(Math.random() * candidatePool.length)]?.id || 'SKIP';
+            const botVote = Math.random() < 0.25 ? 'SKIP' : candidatePool[Math.floor(Math.random() * candidatePool.length)]?.id || 'SKIP';
             updatedVotes[votingBot.id] = botVote;
           }
         }
 
-        // If time reaches 0, conclude meeting
-        if (nextTime <= 0) {
+        const totalLivingCount = players.filter((p) => !p.isDead).length;
+        const allLivingVoted = Object.keys(updatedVotes).length >= totalLivingCount;
+
+        // If time reaches 0 or all living players voted, conclude meeting
+        if (nextTime <= 0 || allLivingVoted) {
           clearInterval(interval);
           setTimeout(() => {
             concludeMeeting();
-          }, 0);
-          return { ...prev, timeLeft: 0, messages: updatedMessages, votes: updatedVotes };
+          }, 300);
+          return {
+            ...prev,
+            phase: 'TALLY',
+            timeLeft: Math.max(0, nextTime),
+            messages: updatedMessages,
+            votes: updatedVotes,
+          };
         }
 
-        return { ...prev, timeLeft: nextTime, messages: updatedMessages, votes: updatedVotes };
+        return {
+          ...prev,
+          phase: currentPhase,
+          timeLeft: nextTime,
+          messages: updatedMessages,
+          votes: updatedVotes,
+        };
       });
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [gameState, meeting?.phase, players, settings]);
+  }, [gameState, players, settings]);
 
   // Overall Task Completion Progress
   const totalTasks = players.filter((p) => !p.role.includes('IMPOSTOR')).flatMap((p) => p.tasks).length;
@@ -1347,7 +1500,7 @@ export default function App() {
           </header>
 
           {/* Canvas Viewport */}
-          <main className="w-full h-full flex items-center justify-center">
+          <main className="w-full h-full flex items-center justify-center relative">
             <GameCanvas
               players={players}
               localPlayer={localPlayer}
@@ -1363,6 +1516,11 @@ export default function App() {
               canFixSabotage={canFixSabotage}
               colorblindMode={appSettings.colorblindMode}
             />
+
+            {/* Red Kill Flash Overlay */}
+            {killFlash && (
+              <div className="absolute inset-0 bg-rose-600/35 backdrop-blur-[1px] pointer-events-none z-40 animate-out fade-out duration-300" />
+            )}
           </main>
 
           {/* Bottom HUD: Virtual Joystick + Action Buttons */}
@@ -1378,51 +1536,92 @@ export default function App() {
 
             {/* Right: Floating Action Control Matrix */}
             <div className="flex items-center gap-3 pointer-events-auto">
-              {/* Report Button */}
-              {nearbyBody && (
-                <button
-                  onClick={() => handleReport(nearbyBody)}
-                  className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-white shadow-xl transition-transform border-2 border-amber-300 animate-pulse"
-                >
-                  <Megaphone className="w-7 h-7" />
-                  <span className="text-[11px] font-mono font-bold mt-1">REPORT</span>
-                </button>
+              {/* Report Button (Always present for living players) */}
+              {!localPlayer.isDead && (
+                nearbyBody ? (
+                  <button
+                    onClick={() => nearbyBody && handleReport(nearbyBody)}
+                    className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-white shadow-xl transition-all border-2 border-amber-300 ring-4 ring-amber-400/40 animate-pulse"
+                    title="Report Dead Body [R]"
+                  >
+                    <Megaphone className="w-7 h-7" />
+                    <span className="text-[10px] font-mono font-black mt-1">REPORT [R]</span>
+                    <span className="text-[8px] font-sans font-medium text-amber-100 truncate max-w-[70px]">
+                      {nearbyBody.victimName}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    className="flex flex-col items-center justify-center w-18 h-18 rounded-3xl bg-slate-900/60 text-slate-500 border border-slate-700/60 cursor-not-allowed opacity-50 backdrop-blur-xs"
+                    title="No dead bodies in report range"
+                  >
+                    <Megaphone className="w-6 h-6" />
+                    <span className="text-[9px] font-mono font-bold mt-1">REPORT [R]</span>
+                  </button>
+                )
               )}
 
               {/* Emergency Button */}
               {canCallEmergency && (
                 <button
                   onClick={handleCallEmergency}
-                  className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-rose-400 animate-pulse"
+                  className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-rose-400 ring-4 ring-rose-400/30 animate-pulse"
+                  title="Call Emergency Meeting [E]"
                 >
                   <Skull className="w-7 h-7" />
-                  <span className="text-[11px] font-mono font-bold mt-1">EMERGENCY</span>
-                </button>
-              )}
-
-              {/* Impostor Kill Button */}
-              {localPlayer.role.includes('IMPOSTOR') && (
-                <button
-                  disabled={!nearbyKillTarget || localPlayer.killCooldown > 0}
-                  onClick={() => nearbyKillTarget && handleKill(nearbyKillTarget)}
-                  className={`flex flex-col items-center justify-center w-20 h-20 rounded-3xl border-2 shadow-xl transition-transform ${
-                    nearbyKillTarget && localPlayer.killCooldown <= 0
-                      ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-400 active:scale-95 animate-bounce'
-                      : 'bg-slate-800 text-slate-400 border-slate-700 opacity-60'
-                  }`}
-                >
-                  <Skull className="w-7 h-7" />
-                  <span className="text-[10px] font-mono font-bold mt-1">
-                    {localPlayer.killCooldown > 0 ? `${localPlayer.killCooldown.toFixed(0)}s` : 'KILL [Q]'}
+                  <span className="text-[10px] font-mono font-bold mt-1">MEETING [E]</span>
+                  <span className="text-[8px] text-rose-100 font-mono">
+                    {localPlayer.emergencyMeetingsRemaining ?? 1} left
                   </span>
                 </button>
               )}
 
+              {/* Impostor Kill Button */}
+              {localPlayer.role.includes('IMPOSTOR') && !localPlayer.isDead && (
+                localPlayer.killCooldown > 0 ? (
+                  <button
+                    disabled
+                    className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-slate-900/85 text-slate-400 border border-slate-700 shadow-lg cursor-not-allowed"
+                    title={`Kill on cooldown (${Math.ceil(localPlayer.killCooldown)}s remaining)`}
+                  >
+                    <Skull className="w-6 h-6 opacity-40 text-slate-400" />
+                    <span className="text-sm font-mono font-black text-rose-400 mt-0.5">
+                      {Math.ceil(localPlayer.killCooldown)}s
+                    </span>
+                    <span className="text-[8px] font-mono uppercase text-slate-500">Cooldown</span>
+                  </button>
+                ) : nearbyKillTarget ? (
+                  <button
+                    onClick={() => nearbyKillTarget && handleKill(nearbyKillTarget)}
+                    className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white shadow-2xl transition-all border-2 border-rose-400 ring-4 ring-rose-500/50 animate-bounce"
+                    title={`Kill ${nearbyKillTarget.name} [Q]`}
+                  >
+                    <Skull className="w-7 h-7" />
+                    <span className="text-[10px] font-mono font-black mt-0.5">KILL [Q]</span>
+                    <span className="text-[8px] font-sans font-medium text-rose-100 truncate max-w-[70px]">
+                      {nearbyKillTarget.name}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-slate-900/75 text-rose-400/60 border border-slate-700 shadow-md cursor-not-allowed opacity-70"
+                    title="Kill ready [Q] - get closer to a crewmate"
+                  >
+                    <Skull className="w-6 h-6 text-rose-500/70" />
+                    <span className="text-[10px] font-mono font-bold mt-0.5">KILL [Q]</span>
+                    <span className="text-[8px] font-mono text-emerald-400">READY</span>
+                  </button>
+                )
+              )}
+
               {/* Impostor Sabotage Menu Button */}
-              {localPlayer.role.includes('IMPOSTOR') && (
+              {localPlayer.role.includes('IMPOSTOR') && !localPlayer.isDead && (
                 <button
                   onClick={() => setShowSabotagePanel(true)}
                   className="flex flex-col items-center justify-center w-18 h-18 rounded-3xl bg-slate-900 hover:bg-slate-800 active:scale-95 text-rose-400 shadow-xl transition-transform border border-slate-700"
+                  title="Open Sabotage Grid [S]"
                 >
                   <Flame className="w-6 h-6" />
                   <span className="text-[10px] font-mono font-bold mt-1">SABOTAGE</span>
@@ -1430,10 +1629,11 @@ export default function App() {
               )}
 
               {/* Impostor Vent Button */}
-              {localPlayer.role.includes('IMPOSTOR') && nearbyVent && (
+              {localPlayer.role.includes('IMPOSTOR') && !localPlayer.isDead && nearbyVent && (
                 <button
                   onClick={() => handleVent(nearbyVent)}
                   className="flex flex-col items-center justify-center w-18 h-18 rounded-3xl bg-cyan-600 hover:bg-cyan-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-cyan-400"
+                  title={localPlayer.isVenting ? 'Exit Vent [V]' : 'Enter Vent [V]'}
                 >
                   <RotateCcw className="w-6 h-6" />
                   <span className="text-[10px] font-mono font-bold mt-1">
@@ -1447,9 +1647,10 @@ export default function App() {
                 <button
                   onClick={() => setShowSabotageFix(true)}
                   className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-yellow-300 animate-bounce"
+                  title="Fix Sabotage [E]"
                 >
                   <AlertTriangle className="w-7 h-7" />
-                  <span className="text-[10px] font-mono font-bold mt-1">REPAIR</span>
+                  <span className="text-[10px] font-mono font-bold mt-1">REPAIR [E]</span>
                 </button>
               )}
 
@@ -1458,6 +1659,7 @@ export default function App() {
                 <button
                   onClick={() => setShowAdminConsole(true)}
                   className="flex flex-col items-center justify-center w-18 h-18 rounded-3xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-indigo-300"
+                  title="Access Station Admin Console [E]"
                 >
                   <Eye className="w-6 h-6" />
                   <span className="text-[10px] font-mono font-bold mt-1">ADMIN</span>
@@ -1469,6 +1671,7 @@ export default function App() {
                 <button
                   onClick={() => setShowSecurityConsole(true)}
                   className="flex flex-col items-center justify-center w-18 h-18 rounded-3xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-emerald-300"
+                  title="View Security Cameras [E]"
                 >
                   <Eye className="w-6 h-6" />
                   <span className="text-[10px] font-mono font-bold mt-1">CAMERAS</span>
@@ -1480,6 +1683,7 @@ export default function App() {
                 <button
                   onClick={() => setActiveTask(nearbyTask)}
                   className="flex flex-col items-center justify-center w-20 h-20 rounded-3xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white shadow-xl transition-transform border-2 border-indigo-400 animate-pulse"
+                  title="Work on Task [E / Space]"
                 >
                   <Zap className="w-7 h-7" />
                   <span className="text-[10px] font-mono font-bold mt-1">USE [E]</span>
@@ -1508,8 +1712,21 @@ export default function App() {
           ejectedPlayer={ejectedPlayer}
           impostorsRemaining={players.filter((p) => p.role.includes('IMPOSTOR') && !p.isDead).length}
           onFinished={() => {
-            checkWinConditions();
-            if (gameState !== 'GAME_OVER') {
+            const hasGameEnded = checkWinConditions();
+            if (!hasGameEnded) {
+              // Reset living player positions around Cafeteria and reset kill cooldowns
+              setPlayers((prev) =>
+                prev.map((p) => ({
+                  ...p,
+                  x: 780 + (Math.random() * 50 - 25),
+                  y: 240 + (Math.random() * 50 - 25),
+                  killCooldown: settings.killCooldown,
+                  isVenting: false,
+                  hasVoted: false,
+                  votedFor: null,
+                }))
+              );
+              setMeeting(null);
               setGameState('PLAYING');
             }
           }}

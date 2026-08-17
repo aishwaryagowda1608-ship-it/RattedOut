@@ -258,8 +258,31 @@ export const GameCanvas: React.FC<Props> = ({
       // 7. Draw Dead Bodies
       deadBodies.forEach((body) => {
         const colorDef = PLAYER_COLORS[body.victimColor];
+        const isNearby = nearbyBody && nearbyBody.id === body.id;
         ctx.save();
         ctx.translate(body.x, body.y);
+
+        // Highlight ring if in report proximity
+        if (isNearby && !localPlayer.isDead) {
+          ctx.strokeStyle = '#F59E0B';
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 26, 18, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Floating REPORT badge
+          ctx.fillStyle = '#D97706';
+          ctx.beginPath();
+          ctx.roundRect(-24, -36, 48, 16, 8);
+          ctx.fill();
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = '900 8.5px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('REPORT [R]', 0, -28);
+        }
 
         // Lower body capsule on ground
         ctx.fillStyle = colorDef ? colorDef.primary : '#EF4444';
@@ -298,6 +321,41 @@ export const GameCanvas: React.FC<Props> = ({
         // Ghost opacity
         if (isGhost) {
           ctx.globalAlpha = 0.55;
+        }
+
+        // Target reticle if this player is the nearby kill target for local impostor
+        const isKillTarget =
+          nearbyKillTarget &&
+          p.id === nearbyKillTarget.id &&
+          localPlayer.role.includes('IMPOSTOR') &&
+          !localPlayer.isDead;
+
+        if (isKillTarget) {
+          ctx.strokeStyle = '#EF4444';
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([4, 2]);
+          ctx.beginPath();
+          ctx.arc(0, 0, 26, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Crosshair markers
+          ctx.fillStyle = '#EF4444';
+          ctx.fillRect(-2, -32, 4, 6);
+          ctx.fillRect(-2, 26, 4, 6);
+          ctx.fillRect(-32, -2, 6, 4);
+          ctx.fillRect(26, -2, 6, 4);
+
+          // Target tag above name
+          ctx.fillStyle = '#DC2626';
+          ctx.beginPath();
+          ctx.roundRect(-22, -44, 44, 14, 6);
+          ctx.fill();
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = '900 8px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('TARGET [Q]', 0, -37);
         }
 
         // Soft drop shadow

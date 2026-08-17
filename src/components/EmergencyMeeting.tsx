@@ -111,10 +111,26 @@ export const EmergencyMeeting: React.FC<Props> = ({
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
                   Crew Manifest & Voting
                 </span>
-                <span className="text-xs text-slate-500 font-mono">
-                  {Object.keys(meeting.votes).length} / {alivePlayers.length} Voted
-                </span>
+                <div className="flex items-center gap-2">
+                  {meeting.phase === 'DISCUSSION' ? (
+                    <span className="text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200 font-mono">
+                      Discussion Phase
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-500 font-mono">
+                      {Object.keys(meeting.votes).length} / {alivePlayers.length} Voted
+                    </span>
+                  )}
+                </div>
               </div>
+
+              {/* Ghost Mode Notice if local player is dead */}
+              {!isLocalAlive && (
+                <div className="mb-3 p-2 rounded-xl bg-slate-200 border border-slate-300 text-slate-700 text-xs flex items-center gap-2">
+                  <Skull className="w-4 h-4 text-slate-500" />
+                  <span className="font-medium">You are deceased (Ghost Spectator). You can read discussion but cannot vote.</span>
+                </div>
+              )}
 
               {/* Player Cards */}
               <div className="grid grid-cols-2 gap-3">
@@ -123,15 +139,18 @@ export const EmergencyMeeting: React.FC<Props> = ({
                   const hasVoted = p.hasVoted || !!meeting.votes[p.id];
                   const isSelected = selectedTarget === p.id;
                   const isSelf = p.id === localPlayer.id;
+                  const isVotingLocked = meeting.phase === 'DISCUSSION';
 
                   return (
                     <button
                       key={p.id}
-                      disabled={p.isDead || !isLocalAlive || hasConfirmedVote}
+                      disabled={p.isDead || !isLocalAlive || hasConfirmedVote || isVotingLocked}
                       onClick={() => handleVoteClick(p.id)}
                       className={`relative p-3 rounded-2xl border text-left transition-all flex items-center justify-between ${
                         p.isDead
-                          ? 'opacity-40 bg-slate-200 border-slate-300'
+                          ? 'opacity-40 bg-slate-200 border-slate-300 cursor-not-allowed'
+                          : isVotingLocked
+                          ? 'bg-white border-slate-200 cursor-default opacity-85'
                           : isSelected
                           ? 'bg-indigo-50 border-indigo-500 ring-2 ring-indigo-300 shadow-xs'
                           : 'bg-white border-slate-200 hover:border-slate-300 shadow-2xs'
@@ -193,7 +212,7 @@ export const EmergencyMeeting: React.FC<Props> = ({
             <div className="mt-4 pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
               {/* Skip Vote Button */}
               <button
-                disabled={!isLocalAlive || hasConfirmedVote}
+                disabled={!isLocalAlive || hasConfirmedVote || meeting.phase === 'DISCUSSION'}
                 onClick={() => handleVoteClick('SKIP')}
                 className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold border transition-all ${
                   selectedTarget === 'SKIP'
@@ -205,8 +224,14 @@ export const EmergencyMeeting: React.FC<Props> = ({
                 <span>Skip Vote</span>
               </button>
 
+              {meeting.phase === 'DISCUSSION' && (
+                <span className="text-xs font-mono font-medium text-amber-600">
+                  Discuss findings with the crew...
+                </span>
+              )}
+
               {/* Confirm Vote Button */}
-              {isLocalAlive && !hasConfirmedVote && selectedTarget && (
+              {isLocalAlive && !hasConfirmedVote && selectedTarget && meeting.phase !== 'DISCUSSION' && (
                 <button
                   onClick={handleConfirmVote}
                   className="flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-bold rounded-xl shadow-sm transition-transform"

@@ -120,6 +120,7 @@ export interface Player {
   votedFor: string | null | 'SKIP';
   hasVoted: boolean;
   killCooldown: number; // in seconds
+  emergencyMeetingsRemaining?: number;
   isVenting: boolean;
   ventId?: string;
   alibiHistory: { room: string; time: number }[];
